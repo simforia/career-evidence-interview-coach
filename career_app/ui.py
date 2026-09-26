@@ -32,7 +32,7 @@ def render_app(client, user_id, workspace, save_fn):
             workspace["selected_profile"] = selected
 
         page = st.radio("Go to", [
-            "Dashboard","Private Import","Master Career Record","Strengths & Gaps",
+            "Dashboard","Master Career Record","Strengths & Gaps",
             "STAR Evidence Builder","Job Review","Practice Sessions",
             "Resume Builder","Workspace Backup"
         ])
@@ -40,25 +40,7 @@ def render_app(client, user_id, workspace, save_fn):
     st.title("Career Evidence & Interview Coach")
     st.caption("Evidence-first: every resume claim should be supportable in an interview.")
 
-    if page == "Private Import":
-        st.subheader("One-time private workspace import")
-        st.write("Use a private import code supplied by the workspace owner. The code is single-use.")
-        code = st.text_input("Private import code", type="password")
-        if st.button("Claim private workspace", type="primary") and code:
-            try:
-                result = client.rpc("claim_workspace_bootstrap", {"claim_code": code}).execute()
-                if result.data is True:
-                    row = client.table("workspace_state").select("state").eq("user_id", user_id).limit(1).execute()
-                    if row.data:
-                        st.session_state.workspace = row.data[0]["state"]
-                    st.success("Private workspace imported.")
-                    st.rerun()
-                else:
-                    st.error("Invalid or already-used import code.")
-            except Exception as exc:
-                st.error(f"Import failed: {exc}")
-
-    elif page == "Dashboard":
+    if page == "Dashboard":
         a,b,c,d = st.columns(4)
         a.metric("Verified facts", sum(1 for x in workspace.get("master_facts",[]) if x.get("verified")))
         b.metric("STAR stories", sum(1 for x in workspace.get("stories",[]) if x.get("situation") and x.get("result")))
