@@ -1,7 +1,7 @@
 import io, json
 from datetime import datetime
 import streamlit as st
-from .core import BEHAVIORAL, extract_text, assess_job, targeted_resume, add_log
+from .core import BEHAVIORAL, extract_text, assess_job, targeted_resume, add_log, build_practice_questions, evaluate_practice_answer
 
 try:
     from docx import Document
@@ -187,35 +187,169 @@ def render_app(client, user_id, workspace, save_fn):
                 _save(client,user_id,workspace,save_fn)
 
     elif page == "Practice Sessions":
-        st.subheader("Practice Sessions")
-        sessions = workspace.get("sessions",[])
-        if not sessions:
-            st.info("Review a job and create a session first.")
-        else:
-            idx = st.selectbox("Session", range(len(sessions)), format_func=lambda i: sessions[i]["title"])
-            session = sessions[idx]
-            job = next((j for j in workspace.get("jobs",[]) if j["id"]==session["job_id"]), None)
-            mode = st.radio("Mode", ["Behavioral / STAR","Resume defense","Job-specific"], horizontal=True)
-            if mode == "Behavioral / STAR":
-                questions = BEHAVIORAL
-            elif mode == "Resume defense":
-                questions = [f"Your resume says: {x['fact']} — walk me through a specific example that proves this." for x in workspace.get("master_facts",[]) if x.get("verified")][:25]
-                if not questions:
-                    questions = ["Describe a resume claim you can prove with a specific example."]
-            else:
-                questions = [f"The posting references {g}. What can you honestly claim, and what would you need to learn?" for g in (job.get("gaps",[]) if job else [])]
-                if not questions:
-                    questions = ["Which requirement in this posting is your weakest area, and how are you closing that gap?"]
+        st.subheader("Mock Interview Practice")
+        st.caption("Choose a job already in the workspace or a reviewed job, then work through one question at a time.")
 
-            qidx = st.number_input("Question", 1, len(questions), 1) - 1
-            question = questions[qidx]
-            st.markdown(f"### {question}")
-            key = f"{mode}:{qidx}"
-            answer = st.text_area("Practice answer / notes", session["answers"].get(key,""), height=220)
-            if st.button("Save answer"):
-                session["answers"][key] = answer
-                add_log(workspace,"practice_answer",question,answer,session["job_id"],session["id"])
-                _save(client,user_id,workspace,save_fn)
+        profiles = workspace.get("interview_profiles", {})
+        reviewed_jobs = workspace.get("jobs", [])
+        targets = []
+        for name, profile in profiles.items():
+            company = profile.get("company", "")
+            label = f"Saved profile — {name}"
+            targets.append((label, "profile", name, company))
+        for job in reviewed_jobs:
+            label = f"Reviewed job — {job.get('company','Unknown')} — {job.get('title','Job')}"
+            targets.append((label, "job", job.get("id"), job.get("company","")))
+
+        if targets:
+            with st.expander("Start a new mock interview", expanded=not workspace.get("sessions")):
+                labels = [x[0] for x in targets]
+                selected_label = st.selectbox("Practice for", labels)
+                selected_target = next(x for x in targets if x[0] == selected_label)
+                mode_new = st.selectbox(
+                    "Practice mode",
+                    ["Mixed mock","Behavioral / STAR","Resume defense","Job-specific"],
+                    help="Mixed mock rotates behavioral, job-specific, and resume-defense questions."
+                )
+                question_count = st.select_slider("Session length", options=[5,8,10,12], value=8)
+                if st.button("Start mock interview", type="primary", use_container_width=True):
+                    source_type, source_id = selected_target[1], selected_target[2]
+                    questions = build_practice_questions(workspace, source_type, source_id, mode_new)[:question_count]
+                    session_id = f"session-{len(workspace.get('sessions',[]))+1}"
+                    session = {
+                        "id": session_id,
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "job_id": source_id if source_type == "job" else None,
+                        "title": selected_label.replace("Saved profile — ","").replace("Reviewed job — ",""),
+                        "mode": mode_new,
+                        "questions": questions,
+                        "question_index": 0,
+                        "answers": {},
+                        "evaluations": {},
+                        "created": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    workspace.setdefault("sessions",[]).append(session)
+                    add_log(workspace,"session","Started mock interview",f"{session['title']} | {mode_new}",session.get("job_id"),session_id)
+                    save_fn(client,user_id,workspace)
+                    st.session_state.active_session = session_id
+                    st.rerun()
+        else:
+            st.info("No saved job profiles are available yet. Add a job in Job Review.")
+
+        sessions = workspace.get("sessions",[])
+        if sessions:
+            st.divider()
+            active_id = st.session_state.get("active_session")
+            default_idx = next((i for i,s in enumerate(sessions) if s.get("id")==active_id), len(sessions)-1)
+            idx = st.selectbox(
+                "Practice session",
+                range(len(sessions)),
+                index=default_idx,
+                format_func=lambda i: f"{sessions[i].get('title','Session')} — {sessions[i].get('mode','Practice')}"
+            )
+            session = sessions[idx]
+            st.session_state.active_session = session.get("id")
+
+            source_type = session.get("source_type")
+            source_id = session.get("source_id")
+            if not source_type:
+                source_type = "job" if session.get("job_id") else "profile"
+                source_id = session.get("job_id") or workspace.get("selected_profile","")
+                session["source_type"] = source_type
+                session["source_id"] = source_id
+
+            mode = session.get("mode","Mixed mock")
+            questions = session.get("questions") or build_practice_questions(workspace, source_type, source_id, mode)
+            session["questions"] = questions
+            if not questions:
+                st.warning("No practice questions could be generated for this target.")
+            else:
+                current = min(int(session.get("question_index",0)), len(questions)-1)
+                session["question_index"] = current
+                completed = len(session.get("evaluations",{}))
+                scores = [v.get("score",0) for v in session.get("evaluations",{}).values() if isinstance(v,dict)]
+                avg = round(sum(scores)/len(scores)) if scores else 0
+
+                m1,m2,m3 = st.columns(3)
+                m1.metric("Progress", f"{completed}/{len(questions)}")
+                m2.metric("Current question", f"{current+1}/{len(questions)}")
+                m3.metric("Average score", f"{avg}%" if scores else "—")
+                st.progress(min(1.0, completed/max(1,len(questions))))
+
+                question = questions[current]
+                st.markdown(f"### Question {current+1}")
+                st.write(question)
+                key = f"q{current}"
+                answer = st.text_area(
+                    "Answer",
+                    value=session.setdefault("answers",{}).get(key,""),
+                    height=240,
+                    key=f"answer_{session.get('id')}_{current}",
+                    placeholder="Answer as if you were speaking to the interviewer. Use a real example and be precise about what you personally did."
+                )
+
+                if st.button("Submit answer for review", type="primary", use_container_width=True):
+                    session["answers"][key] = answer
+                    evaluation = evaluate_practice_answer(answer, mode)
+                    session.setdefault("evaluations",{})[key] = evaluation
+                    add_log(
+                        workspace,
+                        "practice_answer",
+                        f"Answered question {current+1}",
+                        f"Score {evaluation['score']} | {session.get('title','')}",
+                        session.get("job_id"),
+                        session.get("id")
+                    )
+                    save_fn(client,user_id,workspace)
+                    st.rerun()
+
+                evaluation = session.get("evaluations",{}).get(key)
+                if evaluation:
+                    st.divider()
+                    a,b = st.columns([1,2])
+                    a.metric("Answer score", f"{evaluation.get('score',0)}%")
+                    a.write(f"**{evaluation.get('label','')}**")
+                    with b:
+                        st.markdown("**Coach feedback**")
+                        for item in evaluation.get("feedback",[]):
+                            st.write(f"• {item}")
+                    st.markdown("**Interviewer follow-up**")
+                    st.info(evaluation.get("followup","Tell me more about that."))
+
+                    nav1,nav2,nav3 = st.columns(3)
+                    if nav1.button("← Previous", disabled=current==0, use_container_width=True):
+                        session["question_index"] = max(0,current-1)
+                        save_fn(client,user_id,workspace)
+                        st.rerun()
+                    if nav2.button("Try this answer again", use_container_width=True):
+                        session.get("evaluations",{}).pop(key,None)
+                        save_fn(client,user_id,workspace)
+                        st.rerun()
+                    if nav3.button("Next question →", disabled=current>=len(questions)-1, use_container_width=True):
+                        session["question_index"] = min(len(questions)-1,current+1)
+                        save_fn(client,user_id,workspace)
+                        st.rerun()
+
+                weak_counts = {}
+                for sess in sessions:
+                    for ev in sess.get("evaluations",{}).values():
+                        if isinstance(ev,dict):
+                            for weak in ev.get("weak_areas",[]):
+                                weak_counts[weak] = weak_counts.get(weak,0)+1
+                if weak_counts:
+                    st.divider()
+                    st.markdown("**Recurring practice weaknesses**")
+                    names = {
+                        "depth":"answer depth",
+                        "ownership":"first-person ownership",
+                        "technical_detail":"technical detail",
+                        "result":"result / verification",
+                        "reflection":"reflection / lesson learned",
+                        "specificity":"specific evidence",
+                    }
+                    for weak,count in sorted(weak_counts.items(), key=lambda x:x[1], reverse=True):
+                        st.write(f"• {names.get(weak,weak)} — flagged {count} time(s)")
 
     elif page == "Resume Builder":
         st.subheader("Evidence-only Resume Builder")
