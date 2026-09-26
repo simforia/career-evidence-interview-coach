@@ -1,0 +1,280 @@
+import io, json
+from datetime import datetime
+import streamlit as st
+from .core import BEHAVIORAL, extract_text, assess_job, targeted_resume, add_log
+
+try:
+    from docx import Document
+except Exception:
+    Document = None
+
+def _save(client, user_id, workspace, save_fn):
+    save_fn(client, user_id, workspace)
+    st.success("Saved.")
+
+def render_app(client, user_id, workspace, save_fn):
+    with st.sidebar:
+        st.header("Career Workspace")
+        if st.button("Sign out", use_container_width=True):
+            try:
+                client.auth.sign_out()
+            except Exception:
+                pass
+            for key in ["authenticated","user_id","workspace","supabase_client"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
+        profiles = workspace.get("interview_profiles", {})
+        if profiles:
+            names = list(profiles)
+            current = workspace.get("selected_profile") if workspace.get("selected_profile") in profiles else names[0]
+            selected = st.selectbox("Interview profile", names, index=names.index(current))
+            workspace["selected_profile"] = selected
+
+        page = st.radio("Go to", [
+            "Dashboard","Private Import","Master Career Record","Strengths & Gaps",
+            "STAR Evidence Builder","Job Review","Practice Sessions",
+            "Resume Builder","Workspace Backup"
+        ])
+
+    st.title("Career Evidence & Interview Coach")
+    st.caption("Evidence-first: every resume claim should be supportable in an interview.")
+
+    if page == "Private Import":
+        st.subheader("One-time private workspace import")
+        st.write("Use a private import code supplied by the workspace owner. The code is single-use.")
+        code = st.text_input("Private import code", type="password")
+        if st.button("Claim private workspace", type="primary") and code:
+            try:
+                result = client.rpc("claim_workspace_bootstrap", {"claim_code": code}).execute()
+                if result.data is True:
+                    row = client.table("workspace_state").select("state").eq("user_id", user_id).limit(1).execute()
+                    if row.data:
+                        st.session_state.workspace = row.data[0]["state"]
+                    st.success("Private workspace imported.")
+                    st.rerun()
+                else:
+                    st.error("Invalid or already-used import code.")
+            except Exception as exc:
+                st.error(f"Import failed: {exc}")
+
+    elif page == "Dashboard":
+        a,b,c,d = st.columns(4)
+        a.metric("Verified facts", sum(1 for x in workspace.get("master_facts",[]) if x.get("verified")))
+        b.metric("STAR stories", sum(1 for x in workspace.get("stories",[]) if x.get("situation") and x.get("result")))
+        c.metric("Jobs reviewed", len(workspace.get("jobs",[])))
+        d.metric("Practice sessions", len(workspace.get("sessions",[])))
+        st.info("Keep environments and experience levels exact. Do not inflate personal or lab work into professional experience.")
+
+        profiles = workspace.get("interview_profiles", {})
+        selected = workspace.get("selected_profile")
+        if selected in profiles:
+            profile = profiles[selected]
+            st.subheader(selected)
+            st.write(f"**Company:** {profile.get('company','')}  |  **Location:** {profile.get('location','')}")
+            st.write(f"**Framework:** {profile.get('framework','')}")
+            if profile.get("resume"):
+                st.write(f"**Resume:** {profile['resume']}")
+            if profile.get("apply"):
+                st.link_button("Open application", profile["apply"])
+            for item in profile.get("focus",[]):
+                st.write(f"• {item}")
+        else:
+            st.warning("No private profile loaded. Use Private Import or build a new workspace.")
+
+    elif page == "Master Career Record":
+        st.subheader("Master Career Record")
+        st.caption("Add only facts the candidate can defend with specifics.")
+        with st.expander("Add verified fact"):
+            category = st.selectbox("Category", ["Experience","Networking","Cabling","Hardware","Storage","Systems","Security","Education","Certification","Tool","Project","Other"])
+            fact = st.text_area("Fact / capability")
+            source = st.text_input("Evidence source")
+            if st.button("Add fact") and fact.strip():
+                workspace.setdefault("master_facts",[]).append({
+                    "category":category,"fact":fact.strip(),"source":source or "User-entered","verified":True
+                })
+                add_log(workspace,"master_fact","Added verified fact",fact.strip())
+                _save(client,user_id,workspace,save_fn)
+
+        for i,item in enumerate(workspace.get("master_facts",[])):
+            with st.expander(f"{item.get('category','Other')} — {item.get('fact','')[:90]}"):
+                st.write(item.get("fact",""))
+                st.caption(f"Source: {item.get('source','')}")
+                item["verified"] = st.checkbox("Verified / safe for resume use", value=item.get("verified",False), key=f"verified_{i}")
+
+    elif page == "Strengths & Gaps":
+        st.subheader("Strengths & Gaps")
+        left,right = st.columns(2)
+        with left:
+            st.markdown("### Strengths")
+            for item in workspace.get("strengths",[]):
+                if item.get("type") == "strength":
+                    st.write(f"**{item.get('area','')}** — {item.get('level','')}\n\n{item.get('evidence','')}")
+        with right:
+            st.markdown("### Gaps")
+            for item in workspace.get("strengths",[]):
+                if item.get("type") == "gap":
+                    st.write(f"**{item.get('area','')}** — {item.get('level','')}\n\n{item.get('evidence','')}")
+
+        with st.expander("Add item"):
+            kind = st.radio("Type", ["strength","gap"], horizontal=True)
+            area = st.text_input("Area")
+            level = st.text_input("Level")
+            evidence = st.text_area("Evidence")
+            if st.button("Add strength/gap") and area.strip():
+                workspace.setdefault("strengths",[]).append({
+                    "area":area.strip(),"level":level.strip(),"evidence":evidence.strip(),"type":kind
+                })
+                add_log(workspace,"strength_profile",f"Added {kind}",area)
+                _save(client,user_id,workspace,save_fn)
+
+    elif page == "STAR Evidence Builder":
+        st.subheader("STAR Evidence Builder")
+        stories = workspace.setdefault("stories",[])
+        if not stories:
+            if st.button("Create first story"):
+                stories.append({
+                    "name":"New story","category":"General","situation":"","task":"","action":"",
+                    "result":"","reflection":"","confidence":1,"followups":"","promoted":False
+                })
+                _save(client,user_id,workspace,save_fn)
+                st.rerun()
+        else:
+            idx = st.selectbox("Story", range(len(stories)), format_func=lambda i: stories[i].get("name","Story"))
+            story = stories[idx]
+            story["name"] = st.text_input("Story name", story.get("name",""))
+            story["category"] = st.text_input("Category", story.get("category",""))
+            story["situation"] = st.text_area("Situation", story.get("situation",""))
+            story["task"] = st.text_area("Task", story.get("task",""))
+            story["action"] = st.text_area("Action — exact steps personally taken", story.get("action",""), height=150)
+            story["result"] = st.text_area("Result / verification", story.get("result",""))
+            story["reflection"] = st.text_area("Reflection", story.get("reflection",""))
+            story["confidence"] = st.slider("Follow-up confidence", 1, 5, int(story.get("confidence",1)))
+            story["followups"] = st.text_area("Likely challenges / missing facts", story.get("followups",""))
+            if st.button("Save story"):
+                stories[idx] = story
+                add_log(workspace,"star_story",story["name"],json.dumps(story))
+                _save(client,user_id,workspace,save_fn)
+            if st.button("Promote to master record", disabled=not all(story.get(k,"").strip() for k in ["situation","action","result"])):
+                fact = f"{story['name']}: {story['action']} Result: {story['result']}"
+                if not any(x.get("fact")==fact for x in workspace.get("master_facts",[])):
+                    workspace.setdefault("master_facts",[]).append({
+                        "category":"Project","fact":fact,"source":"STAR Evidence Builder","verified":True
+                    })
+                _save(client,user_id,workspace,save_fn)
+
+    elif page == "Job Review":
+        st.subheader("Upload or paste a job")
+        upload = st.file_uploader("Job posting", type=["txt","md","docx","pdf"])
+        pasted = st.text_area("Or paste job description", height=220)
+        text = pasted.strip() or (extract_text(upload) if upload else "")
+        title = st.text_input("Job title")
+        company = st.text_input("Company")
+        location = st.text_input("Location")
+        if st.button("Analyze job") and text:
+            score,matched,gaps = assess_job(text,workspace)
+            job_id = f"job-{len(workspace.get('jobs',[]))+1}"
+            job = {
+                "id":job_id,"title":title or "Uploaded Job","company":company or "Unknown",
+                "location":location,"text":text,"score":score,"matched":matched,"gaps":gaps,
+                "created":datetime.now().isoformat(timespec="seconds")
+            }
+            workspace.setdefault("jobs",[]).append(job)
+            st.session_state.last_job = job_id
+            add_log(workspace,"job_review",f"{job['company']} — {job['title']}",f"Evidence signal {score}",job_id=job_id)
+            _save(client,user_id,workspace,save_fn)
+
+        if workspace.get("jobs"):
+            job = next((j for j in workspace["jobs"] if j["id"]==st.session_state.get("last_job")), workspace["jobs"][-1])
+            st.divider()
+            st.subheader(f"{job['company']} — {job['title']}")
+            a,b,c = st.columns(3)
+            a.metric("Evidence-match signal", f"{job['score']}%")
+            b.metric("Matched terms", len(job["matched"]))
+            c.metric("Potential gaps", len(job["gaps"]))
+            st.caption("This is an evidence/keyword signal, not a hiring prediction.")
+            st.write("**Supported terms:** " + (", ".join(job["matched"]) or "None detected"))
+            st.write("**Potential requirements to verify:** " + (", ".join(job["gaps"]) or "None detected"))
+            if st.button("Create practice session"):
+                session_id = f"session-{len(workspace.get('sessions',[]))+1}"
+                workspace.setdefault("sessions",[]).append({
+                    "id":session_id,"job_id":job["id"],"title":f"{job['company']} — {job['title']}",
+                    "created":datetime.now().isoformat(timespec="seconds"),"answers":{}
+                })
+                add_log(workspace,"session","Created practice session",job["title"],job["id"],session_id)
+                _save(client,user_id,workspace,save_fn)
+
+    elif page == "Practice Sessions":
+        st.subheader("Practice Sessions")
+        sessions = workspace.get("sessions",[])
+        if not sessions:
+            st.info("Review a job and create a session first.")
+        else:
+            idx = st.selectbox("Session", range(len(sessions)), format_func=lambda i: sessions[i]["title"])
+            session = sessions[idx]
+            job = next((j for j in workspace.get("jobs",[]) if j["id"]==session["job_id"]), None)
+            mode = st.radio("Mode", ["Behavioral / STAR","Resume defense","Job-specific"], horizontal=True)
+            if mode == "Behavioral / STAR":
+                questions = BEHAVIORAL
+            elif mode == "Resume defense":
+                questions = [f"Your resume says: {x['fact']} — walk me through a specific example that proves this." for x in workspace.get("master_facts",[]) if x.get("verified")][:25]
+                if not questions:
+                    questions = ["Describe a resume claim you can prove with a specific example."]
+            else:
+                questions = [f"The posting references {g}. What can you honestly claim, and what would you need to learn?" for g in (job.get("gaps",[]) if job else [])]
+                if not questions:
+                    questions = ["Which requirement in this posting is your weakest area, and how are you closing that gap?"]
+
+            qidx = st.number_input("Question", 1, len(questions), 1) - 1
+            question = questions[qidx]
+            st.markdown(f"### {question}")
+            key = f"{mode}:{qidx}"
+            answer = st.text_area("Practice answer / notes", session["answers"].get(key,""), height=220)
+            if st.button("Save answer"):
+                session["answers"][key] = answer
+                add_log(workspace,"practice_answer",question,answer,session["job_id"],session["id"])
+                _save(client,user_id,workspace,save_fn)
+
+    elif page == "Resume Builder":
+        st.subheader("Evidence-only Resume Builder")
+        choices = ["No job — general"] + [f"{j['id']} | {j['company']} — {j['title']}" for j in workspace.get("jobs",[])]
+        choice = st.selectbox("Target job", choices)
+        job = None
+        if choice != "No job — general":
+            job_id = choice.split(" | ",1)[0]
+            job = next(j for j in workspace["jobs"] if j["id"]==job_id)
+        text = targeted_resume(job,workspace)
+        st.text_area("Generated draft",text,height=500)
+        st.download_button("Download TXT",text,"targeted_resume_draft.txt","text/plain",use_container_width=True)
+        if Document and st.button("Build DOCX"):
+            doc = Document()
+            for line in text.splitlines():
+                if not line.strip():
+                    doc.add_paragraph("")
+                elif line.isupper() and not line.startswith("•"):
+                    doc.add_heading(line,0 if not doc.paragraphs else 1)
+                elif line.startswith("• "):
+                    doc.add_paragraph(line[2:],style="List Bullet")
+                else:
+                    doc.add_paragraph(line)
+            bio = io.BytesIO()
+            doc.save(bio)
+            st.download_button("Download DOCX",bio.getvalue(),"targeted_resume_draft.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document",use_container_width=True)
+
+    elif page == "Workspace Backup":
+        st.subheader("Workspace Backup")
+        payload = json.dumps(workspace,indent=2)
+        st.download_button("Download complete workspace JSON",payload,"career_workspace.json","application/json",use_container_width=True)
+        upload = st.file_uploader("Restore workspace JSON",type=["json"])
+        if upload and st.button("Restore"):
+            st.session_state.workspace = json.loads(upload.getvalue().decode("utf-8"))
+            save_fn(client,user_id,st.session_state.workspace)
+            st.rerun()
+
+        st.subheader("Activity log")
+        for item in reversed(workspace.get("practice_log",[])[-50:]):
+            st.write(f"**{item.get('time')} — {item.get('kind')} — {item.get('title')}**")
+            if item.get("body"):
+                st.caption(item["body"][:500])
+
+    save_fn(client,user_id,workspace)
