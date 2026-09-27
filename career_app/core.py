@@ -1,4 +1,4 @@
-import io, re
+import io, re, requests
 from datetime import datetime
 
 try:
@@ -51,6 +51,81 @@ def assess_job(text, workspace):
     missing = sorted(job_terms - evidence_terms)
     score = min(100, round((len(overlap) / max(1, min(len(job_terms), 60))) * 100))
     return score, overlap[:40], missing[:30]
+
+def search_live_jobs(app_id, app_key, location, radius_miles, roles, workspace, results_per_role=20):
+    if not app_id or not app_key:
+        return [], "Adzuna credentials are not configured."
+
+    senior_markers = {
+        "senior","sr.","sr ","lead","principal","manager","director","architect",
+        "staff engineer","level 4","level iv","level 5","level v"
+    }
+    seen = set()
+    ranked = []
+
+    for role in roles:
+        params = {
+            "app_id": app_id,
+            "app_key": app_key,
+            "results_per_page": results_per_role,
+            "what": role,
+            "where": location,
+            "distance": radius_miles,
+            "sort_by": "date",
+            "content-type": "application/json",
+        }
+        try:
+            response = requests.get(
+                "https://api.adzuna.com/v1/api/jobs/us/search/1",
+                params=params,
+                headers={"Accept":"application/json"},
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            return ranked, f"Live job search failed: {exc}"
+
+        for item in payload.get("results", []):
+            title = (item.get("title") or "").strip()
+            company = ((item.get("company") or {}).get("display_name") or "Unknown").strip()
+            url = item.get("redirect_url") or ""
+            key = (title.lower(), company.lower(), url)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            description = (item.get("description") or "").strip()
+            score, matched, gaps = assess_job(f"{title}\n{description}", workspace)
+            lower_title = title.lower()
+            senior_flag = any(marker in lower_title for marker in senior_markers)
+
+            loc = ((item.get("location") or {}).get("display_name") or "").strip()
+            salary_min = item.get("salary_min")
+            salary_max = item.get("salary_max")
+            created = item.get("created")
+
+            fit_score = max(0, score - (25 if senior_flag else 0))
+            ranked.append({
+                "source": "Adzuna",
+                "title": title,
+                "company": company,
+                "location": loc,
+                "url": url,
+                "description": description,
+                "created": created,
+                "salary_min": salary_min,
+                "salary_max": salary_max,
+                "matched": matched,
+                "gaps": gaps,
+                "evidence_score": score,
+                "fit_score": fit_score,
+                "senior_mismatch": senior_flag,
+                "search_role": role,
+            })
+
+    ranked.sort(key=lambda x: (x.get("senior_mismatch",False), -x.get("fit_score",0), x.get("created") or ""))
+    return ranked, None
 
 def targeted_resume(job, workspace):
     target_terms = tokens((job or {}).get("text", ""))
