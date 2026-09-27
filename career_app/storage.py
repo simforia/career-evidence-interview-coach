@@ -1,4 +1,5 @@
 import os
+import hmac
 import streamlit as st
 from datetime import datetime
 from supabase import create_client
@@ -41,18 +42,25 @@ def require_auth(client):
                 st.error(f"Sign-in failed: {exc}")
 
     with create_account:
+        invite_required = _secret("FAMILY_INVITE_CODE")
         email = st.text_input("Email", key="signup_email")
         password = st.text_input("Password", type="password", key="signup_password")
-        if st.button("Create account", use_container_width=True):
-            try:
-                response = client.auth.sign_up({"email": email, "password": password})
-                if response.session and response.user:
-                    st.session_state.authenticated = True
-                    st.session_state.user_id = str(response.user.id)
-                    st.rerun()
-                st.success("Account created. Confirm your email if confirmation is enabled, then sign in.")
-            except Exception as exc:
-                st.error(f"Account creation failed: {exc}")
+        invite_code = st.text_input("Family invite code", type="password", key="signup_invite")
+        if not invite_required:
+            st.warning("New-user registration is temporarily disabled because the family invite code has not been configured.")
+        if st.button("Create account", use_container_width=True, disabled=not bool(invite_required)):
+            if not hmac.compare_digest(invite_code.strip(), invite_required.strip()):
+                st.error("Invalid family invite code.")
+            else:
+                try:
+                    response = client.auth.sign_up({"email": email, "password": password})
+                    if response.session and response.user:
+                        st.session_state.authenticated = True
+                        st.session_state.user_id = str(response.user.id)
+                        st.rerun()
+                    st.success("Account created. Confirm your email if confirmation is enabled, then sign in.")
+                except Exception as exc:
+                    st.error(f"Account creation failed: {exc}")
     st.stop()
 
 def empty_workspace():
