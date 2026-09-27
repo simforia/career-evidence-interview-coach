@@ -57,7 +57,8 @@ def require_auth(client):
 
 def empty_workspace():
     return {
-        "version": 1,
+        "version": 5,
+        "onboarding_complete": False,
         "candidate": {},
         "master_facts": [],
         "strengths": [],
