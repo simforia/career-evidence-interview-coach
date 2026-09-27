@@ -129,7 +129,7 @@ def build_practice_questions(workspace, source_type, source_id, mode):
                 mixed.append(pool[i])
     return mixed
 
-def evaluate_practice_answer(answer, mode="Mixed mock"):
+def evaluate_practice_answer(answer, mode="Mixed mock", question=""):
     text = (answer or "").strip()
     words = text.split()
     lower = text.lower()
@@ -217,7 +217,7 @@ def evaluate_practice_answer(answer, mode="Mixed mock"):
         "weak_areas": weak,
         "followup": followup,
     }
-    result["coaching"] = coach_interview_answer("", text, result)
+    result["coaching"] = coach_interview_answer(question, text, result)
     return result
 
 def _split_sentences(text):
@@ -331,8 +331,8 @@ def coach_interview_answer(question, answer, evaluation):
         missing.append("clear personal ownership")
     if "specificity" in weak:
         missing.append("concrete detail")
-    if "reflection" in weak and "Behavioral" in str(question):
-        missing.append("lesson learned")
+    if "reflection" in weak:
+        missing.append("lesson learned / reflection")
 
     return {
         "opening": opening,
