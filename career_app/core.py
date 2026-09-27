@@ -210,12 +210,136 @@ def evaluate_practice_answer(answer, mode="Mixed mock"):
     else:
         followup = "What was the hardest follow-up question an interviewer could ask about this example, and how would you answer it?"
 
-    return {
+    result = {
         "score": score,
         "label": label,
         "feedback": feedback,
         "weak_areas": weak,
         "followup": followup,
+    }
+    result["coaching"] = coach_interview_answer("", text, result)
+    return result
+
+def _split_sentences(text):
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    return [p.strip() for p in parts if p.strip()]
+
+def _remove_speech_fillers(sentence):
+    s = sentence.strip()
+    s = re.sub(r"^(um+|uh+|erm+)[, ]+", "", s, flags=re.I)
+    s = re.sub(r"\b(you know|I mean)\b[, ]*", "", s, flags=re.I)
+    s = re.sub(r"\b(basically|essentially)\b[, ]*", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" ,")
+    if s:
+        s = s[0].upper() + s[1:]
+    return s
+
+def coach_interview_answer(question, answer, evaluation):
+    text = (answer or "").strip()
+    sentences = [_remove_speech_fillers(s) for s in _split_sentences(text)]
+    sentences = [s for s in sentences if s]
+    lower_sentences = [s.lower() for s in sentences]
+
+    action_words = [
+        "configured","tested","checked","traced","installed","replaced","isolated",
+        "reviewed","verified","troubleshot","built","changed","documented","used",
+        "created","set up","diagnosed","connected","removed","updated","researched",
+        "compared","reset","rebooted","measured","found","identified"
+    ]
+    result_words = [
+        "result","resolved","fixed","worked","verified","confirmed","reduced","improved",
+        "successful","restored","prevented","solved","passed","stable","working","completed"
+    ]
+    reflection_words = [
+        "learned","next time","after that","since then","would do","lesson","taught me",
+        "realized","now I","from that"
+    ]
+
+    used = set()
+    result_idx = [
+        i for i,s in enumerate(lower_sentences)
+        if any(word in s for word in result_words)
+    ]
+    reflection_idx = [
+        i for i,s in enumerate(lower_sentences)
+        if any(word.lower() in s for word in reflection_words)
+    ]
+    action_idx = [
+        i for i,s in enumerate(lower_sentences)
+        if (" i " in f" {s} " or s.startswith("i ") or " my " in f" {s} ")
+        and any(word in s for word in action_words)
+    ]
+
+    context_idx = []
+    for i,s in enumerate(sentences):
+        if i not in result_idx and i not in reflection_idx and i not in action_idx:
+            context_idx.append(i)
+            break
+    if not context_idx and sentences:
+        context_idx = [0]
+
+    ordered = []
+    for group in [context_idx, action_idx, result_idx, reflection_idx]:
+        for i in group:
+            if i not in used and i < len(sentences):
+                ordered.append(sentences[i])
+                used.add(i)
+    for i,s in enumerate(sentences):
+        if i not in used:
+            ordered.append(s)
+
+    suggested = " ".join(ordered).strip()
+    if suggested and suggested[-1] not in ".!?":
+        suggested += "."
+
+    weak = set(evaluation.get("weak_areas", []))
+    improvements = []
+    if "depth" in weak:
+        improvements.append("Add enough context for the interviewer to understand the problem before jumping into the fix.")
+    if "ownership" in weak:
+        improvements.append("Make your personal ownership unmistakable: say what you decided, checked, changed, or verified.")
+    if "technical_detail" in weak:
+        improvements.append("Name the actual troubleshooting steps, tools, settings, or tests you used.")
+    if "result" in weak:
+        improvements.append("Finish with the outcome and how you knew the fix worked. Do not invent a metric if you did not measure one.")
+    if "specificity" in weak:
+        improvements.append("Add one concrete detail from the real event—device, setting, error, scale, test, or observed behavior.")
+    if "reflection" in weak:
+        improvements.append("For behavioral questions, close with the lesson learned or what you would repeat next time.")
+    if not improvements:
+        improvements.append("Keep the same evidence, but deliver it more directly: brief context, your actions, verified result, then stop.")
+
+    score = evaluation.get("score", 0)
+    if score >= 85:
+        opening = "Strong answer. The evidence is clear. A tighter delivery will make it sound more confident and easier for the interviewer to follow."
+    elif score >= 70:
+        opening = "Good answer. The substance is there; this will land better if you tighten the setup, emphasize what you personally did, and close on the result."
+    elif score >= 55:
+        opening = "There is a solid example here. It needs a cleaner structure and more concrete evidence before it will have maximum interview impact."
+    else:
+        opening = "You have the start of a usable answer, but the interviewer still needs clearer evidence of what happened, what you personally did, and what changed."
+
+    missing = []
+    if "result" in weak:
+        missing.append("verified result")
+    if "technical_detail" in weak:
+        missing.append("specific technical actions")
+    if "ownership" in weak:
+        missing.append("clear personal ownership")
+    if "specificity" in weak:
+        missing.append("concrete detail")
+    if "reflection" in weak and "Behavioral" in str(question):
+        missing.append("lesson learned")
+
+    return {
+        "opening": opening,
+        "suggested_answer": suggested or text,
+        "improvements": improvements,
+        "missing": missing,
+        "guardrail": "Suggested wording is built only from the answer you gave. Add missing details only if they are true and you can defend them under follow-up.",
     }
 
 def add_log(workspace, kind, title, body="", job_id=None, session_id=None):
