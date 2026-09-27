@@ -345,7 +345,7 @@ def render_app(client, user_id, workspace, save_fn):
 
                 if st.button("Submit answer for review", type="primary", use_container_width=True):
                     session["answers"][key] = answer
-                    evaluation = evaluate_practice_answer(answer, mode)
+                    evaluation = evaluate_practice_answer(answer, mode, question)
                     session.setdefault("evaluations",{})[key] = evaluation
                     add_log(
                         workspace,
@@ -368,6 +368,25 @@ def render_app(client, user_id, workspace, save_fn):
                         st.markdown("**Coach feedback**")
                         for item in evaluation.get("feedback",[]):
                             st.write(f"• {item}")
+
+                    coaching = evaluation.get("coaching", {})
+                    if coaching:
+                        st.markdown("### Interview-impact coaching")
+                        st.write(coaching.get("opening",""))
+                        for item in coaching.get("improvements",[]):
+                            st.write(f"• {item}")
+
+                        st.markdown("**A stronger way to say the same thing**")
+                        st.info(coaching.get("suggested_answer",""))
+
+                        missing = coaching.get("missing",[])
+                        if missing:
+                            st.warning(
+                                "Before using the polished version, add these only if they are true: "
+                                + ", ".join(missing) + "."
+                            )
+                        st.caption(coaching.get("guardrail",""))
+
                     st.markdown("**Interviewer follow-up**")
                     st.info(evaluation.get("followup","Tell me more about that."))
 
