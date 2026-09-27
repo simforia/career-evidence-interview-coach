@@ -41,3 +41,14 @@ Do not commit actual secret values to this repository.
 py -m pip install -r requirements.txt
 py -m streamlit run app.py
 ```
+
+
+## Family registration gate
+
+New account creation can be restricted with a server-side Streamlit secret:
+
+```toml
+FAMILY_INVITE_CODE="YOUR_PRIVATE_FAMILY_CODE"
+```
+
+Existing users can continue to sign in normally. Do not commit the invite code to GitHub.
