@@ -8,6 +8,11 @@ try:
 except Exception:
     Document = None
 
+try:
+    from streamlit_mic_recorder import speech_to_text
+except Exception:
+    speech_to_text = None
+
 def _save(client, user_id, workspace, save_fn):
     save_fn(client, user_id, workspace)
     st.success("Saved.")
@@ -62,7 +67,7 @@ def render_app(client, user_id, workspace, save_fn):
             for item in profile.get("focus",[]):
                 st.write(f"• {item}")
         else:
-            st.warning("No private profile loaded. Use Private Import or build a new workspace.")
+            st.warning("No saved interview profile is loaded yet. Add or review a job to begin building the workspace.")
 
     elif page == "Master Career Record":
         st.subheader("Master Career Record")
@@ -212,6 +217,12 @@ def render_app(client, user_id, workspace, save_fn):
                     help="Mixed mock rotates behavioral, job-specific, and resume-defense questions."
                 )
                 question_count = st.select_slider("Session length", options=[5,8,10,12], value=8)
+                input_new = st.radio(
+                    "Answer input",
+                    ["Voice","Text"],
+                    horizontal=True,
+                    help="Voice mode lets you speak the answer and converts it to an editable transcript before scoring."
+                )
                 if st.button("Start mock interview", type="primary", use_container_width=True):
                     source_type, source_id = selected_target[1], selected_target[2]
                     questions = build_practice_questions(workspace, source_type, source_id, mode_new)[:question_count]
@@ -223,6 +234,7 @@ def render_app(client, user_id, workspace, save_fn):
                         "job_id": source_id if source_type == "job" else None,
                         "title": selected_label.replace("Saved profile — ","").replace("Reviewed job — ",""),
                         "mode": mode_new,
+                        "input_mode": input_new,
                         "questions": questions,
                         "question_index": 0,
                         "answers": {},
@@ -281,13 +293,55 @@ def render_app(client, user_id, workspace, save_fn):
                 st.markdown(f"### Question {current+1}")
                 st.write(question)
                 key = f"q{current}"
-                answer = st.text_area(
-                    "Answer",
-                    value=session.setdefault("answers",{}).get(key,""),
-                    height=240,
-                    key=f"answer_{session.get('id')}_{current}",
-                    placeholder="Answer as if you were speaking to the interviewer. Use a real example and be precise about what you personally did."
+
+                input_options = ["Voice","Text"]
+                saved_input = session.get("input_mode","Voice")
+                if saved_input not in input_options:
+                    saved_input = "Voice"
+                input_mode = st.radio(
+                    "Answer input",
+                    input_options,
+                    index=input_options.index(saved_input),
+                    horizontal=True,
+                    key=f"input_mode_{session.get('id')}_{current}"
                 )
+                session["input_mode"] = input_mode
+
+                draft_key = f"answer_{session.get('id')}_{current}"
+                if draft_key not in st.session_state:
+                    st.session_state[draft_key] = session.setdefault("answers",{}).get(key,"")
+
+                if input_mode == "Voice":
+                    st.caption("Speak naturally as if the interviewer were in front of you. Microphone permission may be requested by your browser.")
+                    if speech_to_text is None:
+                        st.warning("Voice transcription is temporarily unavailable. Use Text input for this answer.")
+                    else:
+                        spoken = speech_to_text(
+                            language="en",
+                            start_prompt="🎙️ Start answer",
+                            stop_prompt="⏹️ Stop & transcribe",
+                            just_once=False,
+                            use_container_width=True,
+                            key=f"voice_{session.get('id')}_{current}"
+                        )
+                        last_voice_key = f"last_voice_{session.get('id')}_{current}"
+                        if spoken and spoken != st.session_state.get(last_voice_key):
+                            st.session_state[draft_key] = spoken
+                            st.session_state[last_voice_key] = spoken
+                    answer = st.text_area(
+                        "Transcript — review or correct before submitting",
+                        height=240,
+                        key=draft_key,
+                        placeholder="Your spoken answer will appear here after transcription."
+                    )
+                    st.caption("Voice transcription is opt-in. The app stores the transcript and scoring data, not the audio recording.")
+                else:
+                    answer = st.text_area(
+                        "Answer",
+                        height=240,
+                        key=draft_key,
+                        placeholder="Answer as if you were speaking to the interviewer. Use a real example and be precise about what you personally did."
+                    )
 
                 if st.button("Submit answer for review", type="primary", use_container_width=True):
                     session["answers"][key] = answer
